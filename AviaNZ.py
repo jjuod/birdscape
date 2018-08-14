@@ -239,7 +239,7 @@ class AviaNZ(QMainWindow):
                     msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                     reply = msg.exec_()
                     if reply == QMessageBox.Yes:
-                        firstFile = QFileDialog.getOpenFileName(self, 'Choose File', self.dirName, "Wav files (*.wav)")
+                        firstFile, drop = QFileDialog.getOpenFileName(self, 'Choose File', self.dirName, "Wav files (*.wav)")
                     else:
                         sys.exit()
 
@@ -340,10 +340,6 @@ class AviaNZ(QMainWindow):
         self.dragRectangles = specMenu.addAction("Mark boxes in spectrogram", self.dragRectanglesCheck)
         self.dragRectangles.setCheckable(True)
         self.dragRectangles.setChecked(self.config['dragBoxes'])
-
-        self.requireDragging = specMenu.addAction("Mark segments by dragging", self.requireDraggingCheck)
-        self.requireDragging.setCheckable(True)
-        self.requireDragging.setChecked(self.config['requireDrag'])
 
         self.dragRectTransparent = specMenu.addAction("Make dragged boxes transparent", self.dragRectsTransparent)
         self.dragRectTransparent.setCheckable(True)
@@ -495,12 +491,12 @@ class AviaNZ(QMainWindow):
         self.p_overview2.setXLink(self.p_overview)
 
         self.w_ampl = pg.GraphicsLayoutWidget()
-        self.p_ampl = SupportClasses.DragViewBox(self, enableMouse=False,enableMenu=False,enableDrag=False, thisIsAmpl=True)
+        self.p_ampl = SupportClasses.DragViewBox(self, enableMouse=False,enableMenu=False,enableDrag=self.config['requireDrag'], thisIsAmpl=True)
         self.w_ampl.addItem(self.p_ampl,row=0,col=1)
         self.d_ampl.addWidget(self.w_ampl)
 
         self.w_spec = pg.GraphicsLayoutWidget()
-        self.p_spec = SupportClasses.DragViewBox(self, enableMouse=False,enableMenu=False,enableDrag=False, thisIsAmpl=False)
+        self.p_spec = SupportClasses.DragViewBox(self, enableMouse=False,enableMenu=False,enableDrag=self.config['requireDrag'], thisIsAmpl=False)
         self.w_spec.addItem(self.p_spec,row=0,col=1)
         self.d_spec.addWidget(self.w_spec)
 
@@ -757,7 +753,6 @@ class AviaNZ(QMainWindow):
         self.showOverviewSegsCheck()
         self.dragRectsTransparent()
         self.showPointerDetailsCheck()
-        self.requireDraggingCheck()
         self.dragRectanglesCheck()
 
         # add statusbar
@@ -896,6 +891,10 @@ class AviaNZ(QMainWindow):
         self.prevBoxCol = self.config['ColourNone']
         self.bar.setValue(0)
 
+        # reset playback buttons
+        self.playSegButton.setEnabled(False)
+        self.playBandLimitedSegButton.setEnabled(False)
+
         # Delete the overview segments
         for r in self.SegmentRects:
             self.p_overview2.removeItem(r)
@@ -909,17 +908,10 @@ class AviaNZ(QMainWindow):
     def openFile(self):
         """ This handles the menu item for opening a file.
         Splits the directory name and filename out, and then passes the filename to the loader."""
-        fileName = QtGui.QFileDialog.getOpenFileName(self, 'Choose File', self.dirName,"Wav files (*.wav)")
-        #fileName = QtGui.QFileDialog.getOpenFileName(self, 'Choose File', self.dirName,"Wav files (*.wav)")
-
-        if fileName!='':
-            # Find the '/' in the fileName
-            i=len(fileName)-1
-            while fileName[i] != '/' and i>0:
-                i = i-1
-            self.dirName = fileName[:i+1]
-
-            self.listLoadFile(fileName)
+        fileName, drop = QtGui.QFileDialog.getOpenFileName(self, 'Choose File', self.dirName,"Wav files (*.wav)")
+        self.dirName = os.path.dirname(fileName)
+        print("opening file %s" % fileName)
+        self.listLoadFile(os.path.basename(fileName))
 
     def listLoadFile(self,current):
         """ Listener for when the user clicks on a filename (also called by openFile() )
@@ -1056,6 +1048,7 @@ class AviaNZ(QMainWindow):
                 self.audioFormat.setChannelCount(np.shape(self.audiodata)[1])
                 self.audioFormat.setSampleRate(self.sampleRate)
                 self.audioFormat.setSampleSize(wavobj.sampwidth*8)
+                print("Detected format: %d channels, %d Hz, %d bit samples" % (self.audioFormat.channelCount(), self.audioFormat.sampleRate(), self.audioFormat.sampleSize()))
 
                 dlg += 1
 
@@ -1196,13 +1189,6 @@ class AviaNZ(QMainWindow):
         Changes the pyqtgraph MouseMode.
         Also swaps the listeners. """
         self.config['dragBoxes'] = self.dragRectangles.isChecked()
-
-    def requireDraggingCheck(self):
-        """ Listener for the menuitem that switches between dragging and click-clicking to draw segments.
-        swaps the listeners. """
-        self.config['requireDrag'] = self.requireDragging.isChecked()
-        self.p_ampl.enableDrag = self.requireDragging.isChecked()
-        self.p_spec.enableDrag = self.requireDragging.isChecked()
 
     def dragRectsTransparent(self):
         """ Listener for the check menu item that decides if the user wants the dragged rectangles to have colour or not.
@@ -1982,7 +1968,8 @@ class AviaNZ(QMainWindow):
                 # disconnect GrowBox listeners, leave the position listener
                 self.p_ampl.scene().sigMouseMoved.disconnect()
                 self.p_spec.scene().sigMouseMoved.disconnect()
-                self.p_spec.scene().sigMouseMoved.connect(self.mouseMoved)
+                if self.showPointerDetails.isChecked():
+                    self.p_spec.scene().sigMouseMoved.connect(self.mouseMoved)
 
                 # If the user has pressed shift, copy the last species and don't use the context menu
                 # If they pressed Control, add ? to the names
@@ -2101,7 +2088,8 @@ class AviaNZ(QMainWindow):
                 self.p_spec.removeItem(self.drawingBox_spec)
                 # disconnect GrowBox listeners, leave the position listener
                 self.p_spec.scene().sigMouseMoved.disconnect()
-                self.p_spec.scene().sigMouseMoved.connect(self.mouseMoved)
+                if self.showPointerDetails.isChecked():
+                    self.p_spec.scene().sigMouseMoved.connect(self.mouseMoved)
 
                 # Pass either default y coords or box limits:
                 x1 = self.start_ampl_loc
@@ -2515,7 +2503,7 @@ class AviaNZ(QMainWindow):
                 x3 = int((self.segments[self.box1id][0]-self.startRead)*self.sampleRate)
                 x4 = int((self.segments[self.box1id][1]-self.startRead)*self.sampleRate)
 
-            self.humanClassifyDialog1 = Dialogs.HumanClassify1(self.sg[x1:x2,:],self.audiodata[x3:x4],self.sampleRate,self.segments[self.box1id][4],self.lut,self.colourStart,self.colourEnd,self.config['invertColourMap'], self.config['BirdList'])
+            self.humanClassifyDialog1 = Dialogs.HumanClassify1(self.sg[x1:x2,:],self.audiodata[x3:x4],self.sampleRate,self.segments[self.box1id][4],self.lut,self.colourStart,self.colourEnd,self.config['invertColourMap'], self.config['BirdList'], self)
             self.humanClassifyDialog1.setSegNumbers(0, len(self.segments))
             self.humanClassifyDialog1.show()
             self.humanClassifyDialog1.activateWindow()
@@ -3188,7 +3176,7 @@ class AviaNZ(QMainWindow):
             x2 = math.floor(float(x2) * self.config['incr']) #/ self.sampleRate
             #print x1, x2
             # filename = self.filename[:-4] + '_selected' + self.filename[-4:]
-            filename = QtGui.QFileDialog.getSaveFileName(self, 'Save File as', self.dirName, selectedFilter='*.wav')
+            filename, drop = QtGui.QFileDialog.getSaveFileName(self, 'Save File as', self.dirName, selectedFilter='*.wav')
             if filename:
                 wavio.write(str(filename), self.audiodata[int(x1):int(x2)].astype('int16'), self.sampleRate, scale='dtype-limits', sampwidth=2)
 
@@ -3442,7 +3430,7 @@ class AviaNZ(QMainWindow):
             self.playButton.setIcon(self.style().standardIcon(QtGui.QStyle.SP_MediaPause))
             self.playSegButton.setIcon(self.style().standardIcon(QtGui.QStyle.SP_MediaStop))
             self.playBandLimitedSegButton.setIcon(self.style().standardIcon(QtGui.QStyle.SP_MediaStop))
-            self.media_obj.pressedPlay()
+            self.media_obj.pressedPlay(start=self.segmentStart, stop=self.segmentStop, audiodata=self.audiodata)
 
     def playSelectedSegment(self):
         """ Listener for PlaySegment button.
@@ -3453,6 +3441,8 @@ class AviaNZ(QMainWindow):
             self.stopPlayback()
         else:
             if self.box1id > -1:
+                self.stopPlayback()
+
                 start = self.listRectanglesa1[self.box1id].getRegion()[0] * 1000 + self.startRead * 1000
                 stop = self.listRectanglesa1[self.box1id].getRegion()[1] * 1000 + self.startRead * 1000
 
@@ -3460,7 +3450,7 @@ class AviaNZ(QMainWindow):
                 self.playButton.setIcon(self.style().standardIcon(QtGui.QStyle.SP_MediaStop))
                 self.playSegButton.setIcon(self.style().standardIcon(QtGui.QStyle.SP_MediaStop))
                 self.playBandLimitedSegButton.setIcon(self.style().standardIcon(QtGui.QStyle.SP_MediaStop))
-                self.media_obj.pressedPlay(resetPause=True)
+                self.media_obj.filterSeg(start, stop, self.audiodata)
             else:
                 print("Can't play, no segment selected")
 
@@ -3474,6 +3464,7 @@ class AviaNZ(QMainWindow):
             self.stopPlayback()
         else:
             if self.box1id > -1:
+                self.stopPlayback()
                 # check frequency limits, + small buffer bands
                 bottom = max(0.1, self.minFreq, self.segments[self.box1id][2] * self.sampleRate / 2.)
                 top = min(self.segments[self.box1id][3] * self.sampleRate / 2., self.maxFreq-0.1)
@@ -3504,10 +3495,8 @@ class AviaNZ(QMainWindow):
     def stopPlayback(self):
         """ Restores the PLAY buttons, slider, text, calls media_obj to stop playing."""
         self.media_obj.pressedStop()
-        if self.segmentStart is None:
+        if not hasattr(self, 'segmentStart') or self.segmentStart is None:
             self.segmentStart = 0
-        # self.playSlider.setValue(self.segmentStart)
-        # self.bar.setValue(self.convertAmpltoSpec(self.segmentStart / 1000.0 - self.startRead))
         self.playSlider.setValue(-1000)
         self.bar.setValue(-1000)
         self.timePlayed.setText(self.convertMillisecs(self.segmentStart) + "/" + self.totalTime)
@@ -3524,7 +3513,7 @@ class AviaNZ(QMainWindow):
         self.media_obj.time = self.media_obj.time + 20 # in ms. TODO: not hardcode notifyInterval
 
         # listener for playback finish. Note small buffer for catching up
-        if self.media_obj.time > (self.segmentStop-50):
+        if self.media_obj.time > (self.segmentStop-10):
             print("stopped at %d ms" % self.media_obj.time)
             self.stopPlayback()
         else:
@@ -3539,7 +3528,6 @@ class AviaNZ(QMainWindow):
         self.playSlider.setRange(start + 1000.0 * self.startRead, end + 1000.0 * self.startRead)
         self.segmentStart = self.playSlider.minimum()
         self.segmentStop = self.playSlider.maximum()
-        self.media_obj.seekToMs(self.playSlider.minimum())
 
     def volSliderMoved(self, value):
         self.media_obj.applyVolSlider(value)
@@ -3548,7 +3536,7 @@ class AviaNZ(QMainWindow):
         """ Listener for when the bar showing playback position moves.
         """
         self.playSlider.setValue(self.convertSpectoAmpl(evt.x()) * 1000 + self.startRead * 1000)
-        self.media_obj.seekToMs(self.convertSpectoAmpl(evt.x()) * 1000 + self.startRead * 1000)
+        self.media_obj.seekToMs(self.convertSpectoAmpl(evt.x()) * 1000 + self.startRead * 1000, self.segmentStart)
 
     def setOperatorReviewerDialog(self):
         """ Listener for Set Operator/Reviewer menu item.
@@ -3576,7 +3564,7 @@ class AviaNZ(QMainWindow):
         exporter = pge.ImageExporter(self.w_spec.scene())
 
         if imageFile=='':
-            imageFile = QFileDialog.getSaveFileName(self, "Save Image", "", "Images (*.png *.xpm *.jpg)");
+            imageFile, drop = QFileDialog.getSaveFileName(self, "Save Image", "", "Images (*.png *.xpm *.jpg)");
         try:
             # works but requires devel (>=0.11) version of pyqtgraph:
             exporter.export(imageFile)
@@ -3599,7 +3587,9 @@ class AviaNZ(QMainWindow):
         params = [
             {'name': 'Mouse settings', 'type' : 'group', 'children': [
                 {'name': 'Invert mouse', 'type': 'bool', 'tip': 'If true, segments are drawn with right clicking.',
-                 'value': self.config['drawingRightBtn']}
+                 'value': self.config['drawingRightBtn']},
+                {'name': 'Mark by dragging', 'type': 'bool', 'tip': 'If false, mark by clicking',
+                 'value': self.config['requireDrag']}
             ]},
             {'name': 'Paging', 'type': 'group', 'children': [
                 {'name': 'Page size', 'type': 'int', 'value': self.config['maxFileShow'], 'limits': (5, 900),
@@ -3687,6 +3677,10 @@ class AviaNZ(QMainWindow):
                     self.MouseDrawingButton = QtCore.Qt.RightButton
                 else:
                     self.MouseDrawingButton = QtCore.Qt.LeftButton
+            elif childName == 'Mouse settings.Mark by dragging':
+                self.config['requireDrag'] = data
+                self.p_ampl.enableDrag = self.config['requireDrag']
+                self.p_spec.enableDrag = self.config['requireDrag']
             elif childName == 'Paging.Page size':
                 self.config['maxFileShow'] = data
             elif childName=='Paging.Page overlap':
