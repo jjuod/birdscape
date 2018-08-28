@@ -7,6 +7,7 @@
 from PyQt5.QtWidgets import QAbstractButton
 from PyQt5.QtCore import QTime, QFile, QIODevice, QBuffer, QByteArray
 from PyQt5.QtMultimedia import QAudio, QAudioOutput
+from PyQt5.QtGui import QPainter
 
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui
@@ -23,6 +24,7 @@ import WaveletFunctions
 import Segment
 
 from time import sleep
+import time
 
 import librosa
 
@@ -43,10 +45,10 @@ class preProcess:
     """
     # todo: remove duplicate preprocess in 'Wavelet Segments'
 
-    def __init__(self,audioData=None, sampleRate=0, species='Kiwi', df=False, wavelet='dmey2'):
+    def __init__(self,audioData=None, sampleRate=0, spInfo=[], df=False, wavelet='dmey2'):
         self.audioData=audioData
         self.sampleRate=sampleRate
-        self.species=species
+        self.spInfo=spInfo
         self.df=df
         if wavelet == 'dmey2':
             [lowd, highd, lowr, highr] = np.loadtxt('dmey.txt')
@@ -60,24 +62,14 @@ class preProcess:
     def denoise_filter(self, level=5):
         # set df=True to perform both denoise and filter
         # df=False to skip denoise
-        if self.species == 'Kiwi':
-            f1 = 1100
-            f2 = 7000
-            fs = 16000
-        elif self.species == 'Ruru':
-            f1 = 500
-            f2 = 7000
-            fs = 16000
-        elif self.species == 'Bittern':
-            f1 = 100
-            f2 = 200
-            fs = 1000
-        elif self.species == 'Sipo':
-            f1 = 1200
-            f2 = 3800
+        if self.spInfo == []:
             fs = 8000
+            f1 = None
+            f2 = None
         else:
-            fs = 8000
+            f1 = self.spInfo[2]
+            f2 = self.spInfo[3]
+            fs = self.spInfo[4]
 
         if self.sampleRate != fs:
             self.audioData = librosa.core.audio.resample(self.audioData, self.sampleRate, fs)
@@ -102,7 +94,7 @@ class preProcess:
         # wavio.write('../Sound Files/Kiwi/test/Tier1/test/test/test/test_whole.wav', denoisedData, self.sampleRate, sampwidth=2)
         # librosa.output.write_wav('Sound Files/Kiwi/test/Tier1/test/test/test', denoisedData, self.sampleRate, norm=False)
 
-        if self.species in ['Kiwi', 'Ruru', 'Bittern', 'Sipo']:
+        if f1 and f2:
             filteredDenoisedData = self.sp.ButterworthBandpass(denoisedData, self.sampleRate, low=f1, high=f2)
             # filteredDenoisedData = self.sp.bandpassFilter(denoisedData, start=f1, end=f2, sampleRate=self.sampleRate)
         # elif species == 'Ruru':
@@ -119,17 +111,18 @@ class postProcess:
 
     segments:   detected segments in form of [[s1,e1], [s2,e2],...]
     species:    species to consider
-    minLen:     minimum length for the species # min length for kiwi is 5 secs
     """
 
-    def __init__(self,audioData=None, sampleRate=0, segments=[], species='Kiwi', minLen=0):
+    def __init__(self,audioData=None, sampleRate=0, segments=[], spInfo=[]):
         self.audioData = audioData
         self.sampleRate = sampleRate
         self.segments = segments
-        self.species = species
-        self.minLen = minLen
-        if self.minLen == 0 and self.species =='Kiwi':
-            self.minLen = 10
+        if spInfo != []:
+            self.minLen = spInfo[0]
+            self.fundf1 = spInfo[5]
+            self.fundf2 = spInfo[6]
+        else:
+            self.minLen = 0
         # self.confirmedSegments = []  # post processed detections with confidence TP
         # self.segmentstoCheck = []  # need more testing to confirm
 
@@ -182,7 +175,6 @@ class postProcess:
                     if secs > self.minLen:  # just check duration
                         continue
                     else:
-                        print(file, seg, "--> windy")
                         newSegments.remove(seg)
         self.segments = newSegments
 
@@ -228,17 +220,16 @@ class postProcess:
                 continue
             else:
                 # read the sound segment and check fundamental frq.
-                secs = seg[1] - seg[0]
                 data = self.audioData[int(seg[0]*self.sampleRate):int(seg[1]*self.sampleRate)]
 
-                # bring the segment into 16000
-                if self.sampleRate != 16000:
-                    data = librosa.core.audio.resample(data, self.sampleRate, 16000)
-                    sampleRate = 16000
-                else:
-                    sampleRate = self.sampleRate
+                # # bring the segment into 16000 just because ff was better at 16000
+                # if self.sampleRate != 16000:
+                #     data = librosa.core.audio.resample(data, self.sampleRate, 16000)
+                #     sampleRate = 16000
+                # else:
+                #     sampleRate = self.sampleRate
                 # denoise before fundamental frq. extraction
-                sc = preProcess(audioData=data, sampleRate=sampleRate, species='', df=True)  # species left empty to avoid bandpass filter
+                sc = preProcess(audioData=data, sampleRate=self.sampleRate, spInfo=[], df=True)  # species left empty to avoid bandpass filter
                 data, sampleRate = sc.denoise_filter(level=10)
 
                 sp = SignalProc.SignalProc([], 0, 512, 256)
@@ -248,44 +239,38 @@ class postProcess:
                 ind = np.squeeze(np.where(pitch > minfreq))
                 pitch = pitch[ind]
                 if pitch.size == 0:
-                    print(file, 'segment ', seg, ' *++ no fundamental freq detected, could be faded call or noise')
-                    newSegments.remove(seg)
-                    continue
+                    print('segment ', seg, ' *++ no fundamental freq detected, could be faded call or noise')
+                    # newSegments.remove(seg) # for now keep it
+                    continue    # continue to the next seg
                 ind = ind * W / 512
                 x = (pitch * 2. / sampleRate * np.shape(sgRaw)[1]).astype('int')
-
                 from scipy.signal import medfilt
                 x = medfilt(pitch, 15)
-
                 if ind.size < 2:
-
-                    if pitch > 1200 and pitch < 4200:   # todo: scale to other birds, save and import fund frq range from another config file
-                        continue #print file, 'segment ', seg, round(pitch), ' *##kiwi found'
+                    if (pitch > self.fundf1) and (pitch < self.fundf2):
+                        print("kiwi ", pitch)
+                        continue    # print file, 'segment ', seg, round(pitch), ' *##kiwi found'
                     else:
-                        # print file, 'segment ', seg, round(
-                        #     pitch), ' *-- fundamental freq is out of range, could be noise'
+                        print('segment ', seg, round(pitch), ' *-- fundamental freq is out of range, could be noise')
                         newSegments.remove(seg)
-                else:
-                    # Get the individual pieces
-                    segs = segment.identifySegments(ind, maxgap=10, minlength=5)
+                else:   # Get the individual pieces within a seg
+                    syls = segment.identifySegments(ind, maxgap=10, minlength=self.minLen/2)
                     count = 0
-                    if segs == []:
-                        if np.mean(pitch) > 1200 and np.mean(pitch) < 4000:
+                    if syls == []:
+                        if (np.mean(pitch) > self.fundf1) and (np.mean(pitch) < self.fundf2):
                             # print file, 'segment ', seg, round(np.mean(pitch)), ' *## kiwi found '
                             continue
                         else:
-                            # print file, 'segment ', seg, round(
-                                # np.mean(pitch)), ' *-- fundamental freq is out of range, could be noise'
+                            print('segment ', seg, round(np.mean(pitch)), ' *-- fundamental freq is out of range, could be noise')
                             newSegments.remove(seg)
                             continue
                     flag = False
-                    for s in segs:
+                    for s in syls:  # see if any syllable got right ff
                         count += 1
                         s[0] = s[0] * sampleRate / float(256)
                         s[1] = s[1] * sampleRate / float(256)
                         i = np.where((ind > s[0]) & (ind < s[1]))
-                        if np.mean(x[i]) > 1200 and np.mean(x[i]) < 4000:
-                            # print file, 'segment ', seg, round(np.mean(x[i])), ' *## kiwi found ##'
+                        if (np.mean(x[i]) > self.fundf1) and (np.mean(x[i]) < self.fundf2):    # :   # and (
                             flag = True
                             break
                     if not flag:
@@ -457,15 +442,12 @@ class exportSegments:
         in three different formats: time stamps, presence/absence, and per second presence/absence
         in an excel workbook. It makes the workbook if necessary.
 
-        TODO: Ask for what species if not specified
-        TODO: Add a presence/absence at minute (or 5 minute) resolution
-        TODO: Save the annotation files for batch processing
-
         Inputs
-            segments:   detected segments in form of [[s1,e1], [s2,e2],...] # excel is still based on this, to be fixed later using next two.
+            segments:   detected segments in form of [[s1,e1], [s2,e2],...]
+                        OR in format [[s1, e1, fs1, fe1, sp1], [s2, e2, fs2, fe2, sp2], ...]
                 segmentstoCheck     : segments without confidence in form of [[s1,e1], [s2,e2],...]
                 confirmedSegments   : segments with confidence
-            species:    e.g. 'Kiwi'. Default is 'all'
+            species:    default species. e.g. 'Kiwi'. Default is 'all'
             startTime:  start time of the recording (in DoC format). Default is 0
             dirName:    directory name
             filename:   file name e.g.
@@ -481,8 +463,24 @@ class exportSegments:
 
     """
 
-    def __init__(self, segments=[], confirmedSegments=[], segmentstoCheck=[], species='all', startTime=0, dirName='', filename='',datalength=0,sampleRate=0, method="Default", resolution=1, trainTest=False, withConf=False, seg_pos=[], operator='', reviewer='', minLen=0):
+    def __init__(self, segments, confirmedSegments=[], segmentstoCheck=[], species="Don't Know", startTime=0, dirName='', filename='',datalength=0,sampleRate=0, method="Default", resolution=1, trainTest=False, withConf=False, seg_pos=[], operator='', reviewer='', minLen=0, numpages=1):
+
+        if len(segments)>0:
+            if len(segments[0])==2:
+                print("using old format segment list")
+                # convert to new format
+                for seg in segments:
+                    seg.append(0)
+                    seg.append(0)
+                    seg.append(species)
+            elif len(segments[0])==5:
+                print("using new format segment list")
+            else:
+                print("ERROR: incorrect segment format")
+                return
+
         self.segments=segments
+        self.numpages=numpages
         self.confirmedSegments = confirmedSegments
         self.segmentstoCheck = segmentstoCheck
         self.species=species
@@ -504,11 +502,20 @@ class exportSegments:
         self.minLen = minLen
 
     def excel(self):
-        """ This saves the detections in three different formats: time stamps, presence/absence, and per second presence/absence
-        in an excel workbook. It makes the workbook if necessary.
-        TODO: Ask for what species if not specified
+        """ This saves the detections in three different formats: time stamps, presence/absence, and per second presence/absence in an excel workbook. It makes the workbook if necessary.
+        Saves each species into a separate workbook.
         TODO: Add a presence/absence at minute (or 5 minute) resolution
         """
+        # identify all unique species
+        speciesList = set()
+        for seg in self.segments:
+            segmentSpecies = seg[4]
+            if seg[4].endswith('?'):
+                segmentSpecies = segmentSpecies[:-1]
+            speciesList.add(segmentSpecies)
+        print("The following species were detected for export:")
+        print(speciesList)
+
         def makeNewWorkbook():
             wb = Workbook()
             wb.create_sheet(title='Time Stamps', index=1)
@@ -536,30 +543,30 @@ class exportSegments:
             wb.remove_sheet(wb['Sheet'])
             return wb
 
-        def writeToExcelp1():
+        def writeToExcelp1(segments):
             ws = wb['Time Stamps']
             r = ws.max_row + 1
             # Print the filename
             ws.cell(row=r, column=1, value=str(relfname))
             # Loop over the segments
-            for seg in self.segments:
+            for seg in segments:
                 if int(seg[1]-seg[0]) < self.minLen: # skip very short segments
                     continue
-                ws.cell(row=r, column=2, value=str(QTime().addSecs(seg[0]+self.startTime).toString('hh:mm:ss')))
-                ws.cell(row=r, column=3, value=str(QTime().addSecs(seg[1]+self.startTime).toString('hh:mm:ss')))
+                ws.cell(row=r, column=2, value=str(QTime(0,0,0).addSecs(seg[0]+self.startTime).toString('hh:mm:ss')))
+                ws.cell(row=r, column=3, value=str(QTime(0,0,0).addSecs(seg[1]+self.startTime).toString('hh:mm:ss')))
                 r += 1
 
-        def writeToExcelp2():
+        def writeToExcelp2(segments):
             ws = wb['Presence Absence']
             r = ws.max_row + 1
             ws.cell(row=r, column=1, value=str(relfname))
             ws.cell(row=r, column=2, value='_')
-            for seg in self.segments:
+            for seg in segments:
                 if seg[1]-seg[0] > self.minLen: # skip very short segments
                     ws.cell(row=r, column=2, value='Yes')
                     break
 
-        def writeToExcelp3():
+        def writeToExcelp3(detected):
             # todo: use minLen
             ws = wb['Per second']
             r = ws.max_row + 1
@@ -568,12 +575,9 @@ class exportSegments:
             ws.cell(row=r, column=1).font=ft
             c = 2
             for i in range(0,len(detected), self.resolution):
-                if i+self.resolution > self.datalength/self.sampleRate:
-                    ws.cell(row=r, column=c, value=str(i) + '-' + str(int(math.ceil(float(self.datalength)/self.sampleRate))))
-                    ws.cell(row=r, column=c).font = ft
-                else:
-                    ws.cell(row=r, column=c, value=str(i) + '-' + str(i+self.resolution))
-                    ws.cell(row=r, column=c).font = ft
+                endtime = min(i+self.resolution, int(math.ceil(self.datalength * self.numpages / self.sampleRate)))
+                ws.cell(row=r, column=c, value=str(i) + '-' + str(endtime))
+                ws.cell(row=r, column=c).font = ft
                 c += 1
             r += 1
             ws.cell(row=r, column=1, value=str(relfname))
@@ -583,100 +587,79 @@ class exportSegments:
                 ws.cell(row=r, column=c, value=j)
                 c += 1
 
-        # method=self.algs.currentText()
-        if self.withConf:
-            eFile = self.dirName + '/DetectionSummary_withConf_' + self.species + '.xlsx'
-        else:
-            eFile = self.dirName + '/DetectionSummary_' + self.species + '.xlsx'
-        relfname = os.path.relpath(str(self.filename), str(self.dirName))
-        #print eFile, relfname
+        # now, generate the actual files, SEPARATELY FOR EACH SPECIES:
+        for species in speciesList:
+            print("Exporting species %s" % species)
+            # setup output files:
+            if self.withConf:
+                eFile = self.dirName + '/DetectionSummary_withConf_' + species + '.xlsx'
+            else:
+                eFile = self.dirName + '/DetectionSummary_' + species + '.xlsx'
+            relfname = os.path.relpath(str(self.filename), str(self.dirName))
 
-        if os.path.isfile(eFile):
-            try:
-                wb = load_workbook(str(eFile))
-            except:
-                print("Unable to open file")  # Does not exist OR no read permissions
-                return
-        else:
-            wb = makeNewWorkbook()
+            if os.path.isfile(eFile):
+                try:
+                    wb = load_workbook(str(eFile))
+                except:
+                    print("Unable to open file")  # Does not exist OR no read permissions
+                    return
+            else:
+                wb = makeNewWorkbook()
 
-        # Now write the data out
+            # extract SINGLE-SPECIES ONLY segments,
+            # incl. potential assingments ('Kiwi?')
+            segmentsWPossible = []
+            for seg in self.segments:
+                if seg[4] == species or seg[4] == species + '?':
+                    segmentsWPossible.append(seg)
+            if len(segmentsWPossible)==0:
+                print("Warning: no segments found for species %s" % species)
+                continue
 
-        # if self.method == "Wavelets": # and self.trainTest == False:
-        #     detected = np.where(self.annotation > 0)
-        #     # print "det",detected
-        #     if np.shape(detected)[1] > 1:
-        #         self.annotation = self.identifySegments(np.squeeze(detected))
-        #     elif np.shape(detected)[1] == 1:
-        #         self.annotation = self.identifySegments(detected)
-        #     else:
-        #         self.annotation = []
-        #     self.mergeSeg()
-        writeToExcelp1()
-        writeToExcelp2()
+            # export segments
+            writeToExcelp1(segmentsWPossible)
+            # export presence/absence
+            writeToExcelp2(segmentsWPossible)
 
-        # Generate per second binary output
-        n = math.ceil(float(self.datalength) / self.sampleRate)
-        detected = np.zeros(int(n))
-        for seg in self.segments:
-            for a in range(len(detected)):
-                if math.floor(seg[0]) <= a and a < math.ceil(seg[1]):
-                    detected[a] = 1
-        writeToExcelp3()
+            # Generate per second binary output
+            n = math.ceil(float(self.datalength) / self.sampleRate) * self.numpages
+            detected = np.zeros(int(n))
+            for p in range(0, self.numpages-1):
+                print("exporting page %d" % p)
+                for seg in segmentsWPossible:
+                    for t in range(len(detected)):
+                        truet = t + p*self.datalength
+                        if math.floor(seg[0]) <= truet and truet < math.ceil(seg[1]):
+                            detected[truet] = 1
+            writeToExcelp3(detected)
 
-        # Save the file
-        wb.save(str(eFile))
-
-    # def mergeSeg(self):
-    #     # Merge the neighbours, for now wavelet segments
-    #     indx = []
-    #     for i in range(len(self.annotation) - 1):
-    #         # print "index:", i
-    #         # print np.shape(self.annotation)
-    #         # print self.annotation
-    #         if self.annotation[i][1] == self.annotation[i + 1][0]:
-    #             indx.append(i)
-    #     indx.reverse()
-    #     for i in indx:
-    #         self.annotation[i][1] = self.annotation[i + 1][1]
-    #         del (self.annotation[i + 1])
-    #         # return self.annotation
-
-    # def identifySegments(self, seg): #, maxgap=1, minlength=1):
-    # # TODO: *** Replace with segmenter.checkSegmentLength(self,segs, mingap=0, minlength=0, maxlength=5.0)
-    #     segments = []
-    #     # print seg, type(seg)
-    #     if len(seg)>0:
-    #         for s in seg:
-    #             segments.append([s, s+1])
-    #     return segments
+            # Save the file
+            wb.save(str(eFile))
 
     def saveAnnotation(self):
         # Save annotations - batch processing
         annotation = []
-        # self.startTime = int(self.startTime[:2]) * 3600 + int(self.startTime[2:4]) * 60 + int(self.startTime[4:6])
-        annotation.append([-1, str(QTime().addSecs(self.startTime).toString('hh:mm:ss')), "Nirosha", "Stephen", -1])
-        # if len(self.segments) > 0 or len(self.seg_pos) > 0:
+        annotation.append([-1, str(QTime(0,0,0).addSecs(self.startTime).toString('hh:mm:ss')), "Nirosha", "Stephen", -1])
+        # segments can be provided as confirmed/toCheck lists,
+        # otherwise everything from segments list is exported as-is.
         if len(self.confirmedSegments) > 0 or len(self.segmentstoCheck) > 0:
             if self.method == "Wavelets":
-                # if self.withConf:
                 for seg in self.confirmedSegments:
-                    # if seg in self.segments:
                     annotation.append([float(seg[0]), float(seg[1]), 0, 0, self.species])
                 for seg in self.segmentstoCheck:
                     annotation.append([float(seg[0]), float(seg[1]), 0, 0, self.species + '?'])
-                # else:
-                #     for seg in self.segments:
-                #         annotation.append([float(seg[0]), float(seg[1]), 0, 0, self.species + '?'])
             else:
                 for seg in self.segments:
                     annotation.append([float(seg[0]), float(seg[1]), 0, 0, "Don't know"])
+        else:
+            annotation = self.segments
 
         if isinstance(self.filename, str):
             file = open(self.filename + '.data', 'w')
         else:
             file = open(str(self.filename) + '.data', 'w')
         json.dump(annotation, file)
+        file.write("\n")
 
 class TimeAxisHour(pg.AxisItem):
     # Time axis (at bottom of spectrogram)
@@ -742,12 +725,56 @@ class ShadedROI(pg.ROI):
         self.pen = fn.mkPen(*br, **kargs)
         self.currentPen = self.pen
 
+def mouseDragEventFlexible(self, ev):
+    if ev.button() == self.rois[0].parent.MouseDrawingButton:
+        return
+    ev.accept()
+    
+    ## Inform ROIs that a drag is happening 
+    ##  note: the ROI is informed that the handle has moved using ROI.movePoint
+    ##  this is for other (more nefarious) purposes.
+    #for r in self.roi:
+        #r[0].pointDragEvent(r[1], ev)
+        
+    if ev.isFinish():
+        if self.isMoving:
+            for r in self.rois:
+                r.stateChangeFinished()
+        self.isMoving = False
+    elif ev.isStart():
+        for r in self.rois:
+            r.handleMoveStarted()
+        self.isMoving = True
+        self.startPos = self.scenePos()
+        self.cursorOffset = self.scenePos() - ev.buttonDownScenePos()
+        
+    if self.isMoving:  ## note: isMoving may become False in mid-drag due to right-click.
+        pos = ev.scenePos() + self.cursorOffset
+        self.movePoint(pos, ev.modifiers(), finish=False)
+
+def mouseDragEventFlexibleLine(self, ev):
+    if self.movable and ev.button() != self.btn:
+        if ev.isStart():
+            self.moving = True
+            self.cursorOffset = self.pos() - self.mapToParent(ev.buttonDownPos())
+            self.startPosition = self.pos()
+        ev.accept()
+
+        if not self.moving:
+            return
+
+        self.setPos(self.cursorOffset + self.mapToParent(ev.pos()))
+        self.sigDragged.emit(self)
+        if ev.isFinish():
+            self.moving = False
+            self.sigPositionChangeFinished.emit(self)
 
 class ShadedRectROI(ShadedROI):
     # A rectangular ROI that it shaded, for marking segments
-    def __init__(self, pos, size, centered=False, sideScalers=False, **args):
+    def __init__(self, pos, size, centered=False, sideScalers=False, parent=None, **args):
         #QtGui.QGraphicsRectItem.__init__(self, 0, 0, size[0], size[1])
         pg.ROI.__init__(self, pos, size, **args)
+        self.parent = parent
         if centered:
             center = [0.5, 0.5]
         else:
@@ -762,6 +789,67 @@ class ShadedRectROI(ShadedROI):
     # this allows compatibility with LinearRegions:
     def setHoverBrush(self, *br, **args):
         pass
+
+    def mouseDragEvent(self, ev):
+        if ev.isStart():
+            if ev.button() != self.parent.MouseDrawingButton:
+                self.setSelected(True)
+                if self.translatable:
+                    self.isMoving = True
+                    self.preMoveState = self.getState()
+                    self.cursorOffset = self.pos() - self.mapToParent(ev.buttonDownPos())
+                    self.sigRegionChangeStarted.emit(self)
+                    ev.accept()
+                else:
+                    ev.ignore()
+
+        elif ev.isFinish():
+            if self.translatable:
+                if self.isMoving:
+                    self.stateChangeFinished()
+                self.isMoving = False
+            return
+
+        if self.translatable and self.isMoving and ev.buttons() != self.parent.MouseDrawingButton:
+            snap = True if (ev.modifiers() & QtCore.Qt.ControlModifier) else None
+            newPos = self.mapToParent(ev.pos()) + self.cursorOffset
+            self.translate(newPos - self.pos(), snap=snap, finish=False)
+
+pg.graphicsItems.ROI.Handle.mouseDragEvent = mouseDragEventFlexible
+pg.graphicsItems.InfiniteLine.InfiniteLine.mouseDragEvent = mouseDragEventFlexibleLine
+
+class LinearRegionItem2(pg.LinearRegionItem):
+    def __init__(self, parent, *args, **kwds):
+        pg.LinearRegionItem.__init__(self, *args, **kwds)
+        self.parent = parent
+        self.lines[0].btn = self.parent.MouseDrawingButton
+        self.lines[1].btn = self.parent.MouseDrawingButton
+
+    def mouseDragEvent(self, ev):
+        if not self.movable or ev.button()==self.parent.MouseDrawingButton:
+            return
+        ev.accept()
+        
+        if ev.isStart():
+            bdp = ev.buttonDownPos()
+            self.cursorOffsets = [l.pos() - bdp for l in self.lines]
+            self.startPositions = [l.pos() for l in self.lines]
+            self.moving = True
+            
+        if not self.moving:
+            return
+            
+        self.lines[0].blockSignals(True)  # only want to update once
+        for i, l in enumerate(self.lines):
+            l.setPos(self.cursorOffsets[i] + ev.pos())
+        self.lines[0].blockSignals(False)
+        self.prepareGeometryChange()
+        
+        if ev.isFinish():
+            self.moving = False
+            self.sigRegionChangeFinished.emit(self)
+        else:
+            self.sigRegionChanged.emit(self)
 
 class DragViewBox(pg.ViewBox):
     # A normal ViewBox, but with ability to drag the segments
@@ -870,25 +958,14 @@ class ControllableAudio(QAudioOutput):
     def __init__(self, format):
         super(ControllableAudio, self).__init__(format)
         # on this notify, move slider (connected in main file)
-        self.setNotifyInterval(20)
+        self.setNotifyInterval(30)
         self.stateChanged.connect(self.endListener)
-        self.soundFile = QFile()
         self.tempin = QBuffer()
-        self.setBufferSize(3000000)
+        self.setBufferSize(3000)
         self.startpos = 0
+        self.timeoffset = 0
         self.keepSlider = False
         self.format = format
-
-    def load(self, soundFileName):
-        if self.soundFile.isOpen():
-            self.soundFile.close()
-        self.startpos = 0
-
-        self.soundFile.setFileName(soundFileName)
-        try:
-            self.soundFile.open(QIODevice.ReadOnly)
-        except Exception as e:
-            print("ERROR opening file: %s" % e)
 
     def isPlaying(self):
         return(self.state() == QAudio.ActiveState)
@@ -898,14 +975,15 @@ class ControllableAudio(QAudioOutput):
         if self.state() == QAudio.IdleState:
             # give some time for GUI to catch up and stop
             while(self.state() != QAudio.StoppedState):
-                sleep(0.02)
+                sleep(0.03)
                 self.notify.emit()
             self.keepSlider=False
             self.stop()
 
     def pressedPlay(self, resetPause=False, start=0, stop=0, audiodata=None):
         if not resetPause and self.state() == QAudio.SuspendedState:
-            print("resuming at: %d" % self.soundFile.pos())
+            print("resuming at: %d" % self.pauseoffset)
+            self.sttime = time.time() - self.pauseoffset/1000
             self.resume()
         else:
             if not self.keepSlider or resetPause:
@@ -917,10 +995,15 @@ class ControllableAudio(QAudioOutput):
             pos = self.tempin.pos() # bytes
             pos = self.format.durationForBytes(pos) / 1000 # convert to ms
             pos = pos + start
+            print("pos: %d start: %d stop %d" %(pos, start, stop))
             self.filterSeg(pos, stop, audiodata)
 
     def pressedPause(self):
         self.keepSlider=True # a flag to avoid jumping the slider back to 0
+        pos = self.tempin.pos() # bytes
+        pos = self.format.durationForBytes(pos) / 1000 # convert to ms
+        # store offset, relative to the start of played segment
+        self.pauseoffset = pos + self.timeoffset
         self.suspend()
 
     def pressedStop(self):
@@ -929,22 +1012,22 @@ class ControllableAudio(QAudioOutput):
         self.stop()
         if self.tempin.isOpen():
             self.tempin.close()
-        if self.soundFile.isOpen():
-            self.soundFile.seek(self.startpos)
 
-    def filterBand(self, start, stop, lo, hi, audiodata, sp):
-        # takes start-end in ms
-        self.time = max(0, start)
+    def filterBand(self, start, stop, low, high, audiodata, sp):
+        # takes start-end in ms, relative to file start
+        self.timeoffset = max(0, start)
         start = max(0, start * self.format.sampleRate() // 1000)
         stop = min(stop * self.format.sampleRate() // 1000, len(audiodata))
         segment = audiodata[start:stop]
-        segment = sp.bandpassFilter(segment, lo, hi)
+        print(low,high,"band")
+        segment = sp.bandpassFilter(segment,sampleRate=None, start=low, end=high)
         # segment = self.sp.ButterworthBandpass(segment, self.sampleRate, bottom, top,order=5)
         self.loadArray(segment)
 
     def filterSeg(self, start, stop, audiodata):
         # takes start-end in ms
-        self.time = max(0, start)
+        print("filtering between %d -%d" % (start, stop))
+        self.timeoffset = max(0, start)
         start = max(0, int(start * self.format.sampleRate() // 1000))
         stop = min(int(stop * self.format.sampleRate() // 1000), len(audiodata))
         segment = audiodata[start:stop]
@@ -970,7 +1053,9 @@ class ControllableAudio(QAudioOutput):
         self.tempin.setBuffer(self.temparr)
         self.tempin.open(QIODevice.ReadOnly)
 
+        # actual timer is launched here, with time offset set asynchronously
         sleep(0.2)
+        self.sttime = time.time() - self.timeoffset/1000
         self.start(self.tempin)
 
     def seekToMs(self, ms, start):
@@ -978,7 +1063,7 @@ class ControllableAudio(QAudioOutput):
         # start is an offset for the current view start, as it is position 0 in extracted file
         self.reset()
         self.tempin.seek(self.format.bytesForDuration((ms-start)*1000))
-        self.time = ms
+        self.timeoffset = ms
 
     def applyVolSlider(self, value):
         # passes UI volume nonlinearly
@@ -999,6 +1084,8 @@ class FlowLayout(QtGui.QLayout):
         self.setSpacing(spacing)
 
         self.itemList = []
+
+        self.margin = margin
 
     def __del__(self):
         item = self.takeAt(0)
@@ -1040,14 +1127,14 @@ class FlowLayout(QtGui.QLayout):
     def sizeHint(self):
         return self.minimumSize()
 
-    def minimumSize(self):
-        size = QtCore.QSize()
-
-        for item in self.itemList:
-            size = size.expandedTo(item.minimumSize())
-
-        size += QtCore.QSize(2 * self.margin(), 2 * self.margin())
-        return size
+    # def minimumSize(self):
+    #     size = QtCore.QSize()
+    #
+    #     for item in self.itemList:
+    #         size = size.expandedTo(item.minimumSize())
+    #
+    #     size += QtCore.QSize(2 * self.margin(), 2 * self.margin())
+    #     return size
 
     def _doLayout(self, rect, testOnly):
         x = rect.x()
@@ -1081,41 +1168,3 @@ class FlowLayout(QtGui.QLayout):
             lineHeight = max(lineHeight, item.sizeHint().height())
 
         return y + lineHeight - rect.y()
-
-
-#+++++++++++++++++++++++++++++++
-# Helper functions
-def splitFile5mins(self, name):
-    # Nirosha wants to split files that are long (15 mins) into 5 min segments
-    # Could be used when loading long files :)
-    try:
-        self.audiodata, self.sampleRate = lr.load(name,sr=None)
-    except:
-        print("Error: try another file")
-    nsamples = np.shape(self.audiodata)[0]
-    lengthwanted = self.sampleRate * 60 * 5
-    count = 0
-    while (count + 1) * lengthwanted < nsamples:
-        data = self.audiodata[count * lengthwanted:(count + 1) * lengthwanted]
-        filename = name[:-4] + '_' +str(count) + name[-4:]
-        lr.output.write_wav(filename, data, self.sampleRate)
-        count += 1
-    data = self.audiodata[(count) * lengthwanted:]
-    filename = name[:-4] + '_' + str((count)) + name[-4:]
-    lr.output.write_wav(filename,data,self.sampleRate)
-
-    # ###########
-    # #just testing
-    # # fName='Sound Files/Kiwi/test/Tier1/CL78_BIRM_141120_212934'
-    # fName='Sound Files/Kiwi/test/Tier1/BV21_BIRD_141206_234353'
-    # # fName='Sound Files/Kiwi/test/Ponui/kiwi-test2'
-    # ws1=WaveletSegment()
-    # ws1.loadData(fName, trainTest=False)
-    # det = ws1.waveletSegment_test(fName=None, data=ws1.data, sampleRate=ws1.sampleRate, species=ws1.species,
-    #                                          trainTest=False)
-    # # det = np.ones(900)
-    # if sum(det)>0:
-    #     post=postProcess(ws1.data, ws1.sampleRate, det)
-    #     # post.detectClicks()
-    #     post.eRatioConfd()
-

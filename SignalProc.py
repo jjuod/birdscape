@@ -3,6 +3,7 @@
 
 import numpy as np
 import scipy.signal as signal
+import spectrum
 
 class SignalProc:
     """ This class implements various signal processing algorithms for the AviaNZ interface.
@@ -35,16 +36,45 @@ class SignalProc:
         pN = np.sum(self.data[startNoise:startNoise+self.length]**2)/self.length
         return 10.*np.log10(pS/pN)
 
-    def spectrogram(self,data,window_width=None,incr=None,window='Hann',mean_normalise=True,onesided=True,multitaper=False,need_even=False):
+    def equalLoudness(self,data):
+        # TODO: Assumes 16000 sampling rate, fix!
+        # Basically, save a few more sets of filter coefficients...
+
+        # Basic equal loudness curve. 
+        # This is for humans, NOT birds (there is a paper that claims to have some, but I can't access it:
+        # https://doi.org/10.1121/1.428951)
+
+        # The filter weights were obtained from Matlab (using yulewalk) for the standard 80 dB ISO curve
+        # for a sampling rate of 16000
+
+        # 10 coefficient Yule-Walker fit for [0,120;20,113;30,103;40,97;50,93;60,91;70,89;80,87;90,86;100,85;200,78;300,76;400,76;500,76;600,76;700,77;800,78;900,79.5;1000,80;1500,79;2000,77;2500,74;3000,71.5;3700,70;4000,70.5;5000,74;6000,79;7000,84;8000,86]
+        # Or at least, EL80(:,1)./(fs/2) and m=10.^((70-EL80(:,2))/20);
+
+        ay = np.array([1.0000,-0.6282, 0.2966,-0.3726,0.0021,-0.4203,0.2220,0.0061, 0.0675, 0.0578,0.0322])
+        by = np.array([0.4492,-0.1435,-0.2278,-0.0142,0.0408,-0.1240,0.0410,0.1048,-0.0186,-0.0319,0.0054])
+
+        # Butterworth highpass
+        ab = np.array([1.0000,-1.9167,0.9201])
+        bb = np.array([0.9592,-1.9184,0.9592])
+
+        data = signal.lfilter(by,ay,data)
+        data = signal.lfilter(bb,ab,data)
+
+        return data
+
+    def spectrogram(self,data,window_width=None,incr=None,window='Hann',equal_loudness=False,mean_normalise=True,onesided=True,multitaper=False,need_even=False):
         """ Compute the spectrogram from amplitude data
         Returns the power spectrum, not the density -- compute 10.*log10(sg) before plotting.
         Uses absolute value of the FT, not FT*conj(FT), 'cos it seems to give better discrimination
         Options: multitaper version, but it's slow, mean normalised, even, one-sided.
         This version is faster than the default versions in pylab and scipy.signal
         Assumes that the values are not normalised.
+        TODO: Makes a copy of the data and uses that to ensure can be inverted. This is memory wasteful. Is that a problem?
         """
         if data is None:
             print ("Error")
+
+        datacopy = data.astype('float')
 
         if window_width is None:
             window_width = self.window_width
@@ -86,69 +116,135 @@ class SignalProc:
             print("unknown window, using Hann")
             window = 0.5 * (1 - np.cos(2 * np.pi * np.arange(window_width) / (window_width - 1)))
 
-        if mean_normalise:
-            data -= data.mean()
+        if equal_loudness:
+            datacopy = self.equalLoudness(datacopy)
 
+        if mean_normalise:
+            datacopy -= datacopy.mean()
+
+        starts = range(0, len(datacopy) - window_width, incr)
         if multitaper:
             from spectrum import dpss, pmtm
             [tapers, eigen] = dpss(window_width, 2.5, 4)
             counter = 0
-            sg = np.zeros((int(np.ceil(float(len(data)) / incr)),window_width / 2))
-            for start in range(0, len(data) - window_width, incr):
-                S = pmtm(data[start:start + window_width], e=tapers, v=eigen, show=False)
-                sg[counter:counter + 1,:] = S[window_width / 2:].T
+            sg = np.zeros((len(starts),window_width // 2))
+            for start in starts:
+                Sk, weights, eigen = pmtm(datacopy[start:start + window_width], v=tapers, e=eigen, show=False)
+                Sk = abs(Sk)**2
+                Sk = np.mean(Sk.T * weights, axis=1)
+                sg[counter:counter + 1,:] = Sk[window_width // 2:].T
                 counter += 1
             sg = np.fliplr(sg)
         else:
-            starts = range(0, len(data) - window_width, incr)
             if need_even:
-                starts = np.hstack((starts, np.zeros((window_width - len(data) % window_width))))
+                starts = np.hstack((starts, np.zeros((window_width - len(datacopy) % window_width))))
 
             ft = np.zeros((len(starts), window_width))
             for i in starts:
-                ft[i // incr, :] = window * data[i:i + window_width]
+                ft[i // incr, :] = window * datacopy[i:i + window_width]
             ft = np.fft.fft(ft)
             if onesided:
                 sg = np.absolute(ft[:, :window_width // 2])
             else:
                 sg = np.absolute(ft)
-            #sg = (ft*np.conj(ft))[:,window_width / 2:].T
+            #sg = (ft*np.conj(ft))[:,window_width // 2:].T
         return sg
 
-    def bandpassFilter(self,data=None,start=1000,end=10000):
+    def bandpassFilter(self,data=None,sampleRate=None,start=0,end=None,minFreq=0,maxFreq=None):
         """ FIR bandpass filter
         128 taps, Hamming window, very basic.
         """
         if data is None:
             data = self.data
+        if sampleRate is None:
+            sampleRate = self.sampleRate
+        if end is None:
+            end = self.sampleRate/2
+        if maxFreq is None:
+            maxFreq = self.sampleRate/2
+        start = max(start,0,minFreq)
+        end = min(end,maxFreq,self.sampleRate/2)
 
-        nyquist = self.sampleRate/2.0
+        print(start,end,minFreq,maxFreq)
+
+        if start == minFreq and end == maxFreq:
+            print("No filter needed!")
+            return data
+
+        nyquist = self.sampleRate/2
         ntaps = 128
-        taps = signal.firwin(ntaps, cutoff=[start / nyquist, end / nyquist], window=('hamming'), pass_zero=False)
+
+        if start == minFreq:
+            # Low pass
+            print("Low")
+            taps = signal.firwin(ntaps, cutoff=[end / nyquist], window=('hamming'), pass_zero=True)
+        elif end == maxFreq:
+            # High pass
+            print("High")
+            taps = signal.firwin(ntaps, cutoff=[start / nyquist], window=('hamming'), pass_zero=False)
+        else:
+            # Bandpass
+            print("Band")
+            taps = signal.firwin(ntaps, cutoff=[start / nyquist, end / nyquist], window=('hamming'), pass_zero=False)
         #ntaps, beta = signal.kaiserord(ripple_db, width)
         #taps = signal.firwin(ntaps,cutoff = [500/nyquist,8000/nyquist], window=('kaiser', beta),pass_zero=False)
         return signal.lfilter(taps, 1.0, data)
 
-    def ButterworthBandpass(self,data,sampleRate,low=1000,high=5000,order=10):
+    def ButterworthBandpass(self,data,sampleRate,low=0,high=None,minFreq=0,maxFreq=None,order=10,band=50):
         """ Basic IIR bandpass filter.
         Identifies order of filter, max 10.
 
         """
         if data is None:
             data = self.data
+        if sampleRate is None:
             sampleRate = self.sampleRate
-        nyquist = sampleRate/2.0
+        if high is None:
+            high = sampleRate/2
+        if maxFreq is None:
+            maxFreq = sampleRate/2
+        low = max(low,0,minFreq)
+        high = min(high,maxFreq,sampleRate/2)
+        
+        print(low,high,minFreq,maxFreq)
 
-        lowPass = float(low)/nyquist
-        highPass = float(high)/nyquist
-        lowStop = float(low-50)/nyquist
-        highStop = float(high+50)/nyquist
-        # calculate the best order
-        order,wN = signal.buttord([lowPass, highPass], [lowStop, highStop], 3, 50)
+        if low == minFreq and high == maxFreq:
+            print("No filter needed!")
+            return data
 
-        if order>10:
-            order=10
-        b, a = signal.butter(order,[lowPass, highPass], btype='band')
+        nyquist = sampleRate/2
+
+        if low == minFreq:
+            # Low pass
+            cut1 = high/nyquist
+            cut2 = (high+band)/nyquist
+            # calculate the best order
+            order,wN = signal.buttord(cut1, cut2, 3, band)
+            if order>10:
+                order=10
+            b, a = signal.butter(order,wN,btype='lowpass')
+        elif high == maxFreq:
+            # High pass
+            cut1 = low/nyquist
+            cut2 = (low-band)/nyquist
+            # calculate the best order
+            order,wN = signal.buttord(cut1, cut2, 3, band)
+            if order>10:
+                order=10
+            b, a = signal.butter(order,wN, btype='highpass')
+        else:
+            # Band pass
+            lowPass = low/nyquist
+            highPass = high/nyquist
+            lowStop = (low-band)/nyquist
+            highStop = (high+band)/nyquist
+            # calculate the best order
+            order,wN = signal.buttord([lowPass, highPass], [lowStop, highStop], 3, band)
+            if order>10:
+                order=10
+            b, a = signal.butter(order,wN, btype='bandpass')
+            #b, a = signal.butter(order,[lowPass, highPass], btype='bandpass')
+
         return signal.filtfilt(b, a, data)
 
     # The next functions perform spectrogram inversion
